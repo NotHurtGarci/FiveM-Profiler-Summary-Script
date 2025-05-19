@@ -54,16 +54,30 @@ for event in events:
             del timestamps[name]
 
 # Analyze grouped data
-def summarize(data, label):
+def summarize(data, label, spike_threshold_ms=5):
     summary = []
     for name, durations in data.items():
         total = sum(durations)
         avg = total / len(durations)
         count = len(durations)
+        max_dur = max(durations)
+        min_dur = min(durations)
         resource = extract_resource(name)
+        over_threshold = sum(1 for d in durations if d / 1000 > spike_threshold_ms)
         freq_per_sec = count / (max(durations) / 1_000_000) if durations else 0
-        summary.append((name, avg / 1000, count, total / 1000, resource, freq_per_sec))
+        summary.append((
+            name,
+            avg / 1000,                # average in ms
+            count,
+            total / 1000,              # total in ms
+            resource,
+            freq_per_sec,
+            max_dur / 1000,            # max in ms
+            min_dur / 1000,            # min in ms
+            over_threshold             # how many above threshold
+        ))
     return sorted(summary, key=lambda x: x[1], reverse=True)
+
 
 tick_summary = summarize(categories["tick"], "tick")
 ref_summary = summarize(categories["ref_call"], "ref_call")
@@ -74,8 +88,8 @@ resource_ranking = sorted(resource_totals.items(), key=lambda x: x[1], reverse=T
 
 # Plot helper
 def plot_top10(data, title, filename):
-    names = [n[:40] + "..." if len(n) > 40 else n for n, _, _, _, _, _ in data[:10]]
-    values = [v for _, v, _, _, _, _ in data[:10]]
+    names = [row[0][:40] + "..." if len(row[0]) > 40 else row[0] for row in data[:10]]
+    values = [row[1] for row in data[:10]]  # avg time (ms)
     plt.figure(figsize=(10, 5))
     plt.barh(names, values, color='skyblue')
     plt.xlabel("Average Execution Time (ms)")
@@ -90,6 +104,38 @@ plot_top10(tick_summary, "Top 10 Tick Handlers", "chart_ticks.png")
 plot_top10(ref_summary, "Top 10 Ref Calls", "chart_refcalls.png")
 plot_top10(event_summary, "Top 10 Events", "chart_events.png")
 
+# Helper to render detailed tables with top N rows
+def add_table(pdf, title, summary_data, total_cpu):
+    pdf.add_page()
+    pdf.set_font("Arial", "B", 14)
+    pdf.cell(200, 10, title, ln=True)
+    pdf.set_font("Arial", "B", 8)
+    headers = ["Function", "Avg (ms)", "Max (ms)", "Min (ms)", "Total (ms)", "Calls", "% Total", "Freq/s", ">5ms"]
+    col_widths = [50, 16, 16, 16, 20, 18, 20, 18, 16]
+
+    for i, h in enumerate(headers):
+        pdf.cell(col_widths[i], 6, h, border=1)
+    pdf.ln()
+
+    pdf.set_font("Arial", size=7)
+    for row in summary_data[:20]:
+        name, avg, count, total, resource, freq, max_d, min_d, spikes = row
+        percent = (total / total_cpu) * 100 if total_cpu > 0 else 0
+        cells = [
+            name[:48] + "..." if len(name) > 48 else name,
+            f"{avg:.2f}", f"{max_d:.2f}", f"{min_d:.2f}", f"{total:.1f}",
+            str(count), f"{percent:.1f}%", f"{freq:.2f}", str(spikes)
+        ]
+        for i, text in enumerate(cells):
+            pdf.cell(col_widths[i], 6, text, border=1)
+        pdf.ln()
+
+
+# Total CPU time for % calculations
+total_cpu_time = sum(resource_totals.values())
+
+
+# Save final PDF
 
 # Generate PDF report
 pdf = FPDF()
@@ -111,6 +157,11 @@ for title, path in [("Tick Handlers", "chart_ticks.png"),
     pdf.set_font("Arial", "B", 14)
     pdf.cell(200, 10, f"{title}", ln=True)
     pdf.image(path, x=10, y=30, w=190)
+
+# Add detailed tables to the PDF
+add_table(pdf, "Top Tick Handlers (Detailed)", tick_summary, total_cpu_time)
+add_table(pdf, "Top Lua Ref Calls (Detailed)", ref_summary, total_cpu_time)
+add_table(pdf, "Top Custom Events (Detailed)", event_summary, total_cpu_time)
 
 
 # Resource table
